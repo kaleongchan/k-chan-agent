@@ -1,4 +1,11 @@
-# import external packages
+'''
+This agent employs a basic strategy:
+* scan and find the closest target to get to, and repeat
+* remember all the bombs and blast area, dodge them at all cost
+* won't attempt to bomb any opponent :D
+* can be quite dumb to put itself onto a dead end...
+'''
+
 import random
 import queue
 from coderone.dungeon.agent import EntityTags
@@ -6,10 +13,15 @@ from coderone.dungeon.agent import EntityTags
 class Agent:
 
     ACTIONS = ['','u','d','l','r','p']
+    BOMBABLE_TAGS = {
+        EntityTags.SoftBlock.value,
+        EntityTags.OreBlock.value,
+    }
+
     VISITABLE_TAGS = {
         EntityTags.Treasure.value,
         EntityTags.Ammo.value,
-        None
+        None,
     }
 
     DIRECTIONS = {
@@ -18,44 +30,43 @@ class Agent:
         (0, 1): 'u',
         (0, -1): 'd',
     }
-    
+
     def __init__(self):
-        '''
-        Place any initialisation code for your agent here (if any)
+        self.bombs_checker = BombsChecker()
 
-        '''
-
-        self.bombs = BombsChecker()
-        self.ignore_targets = set()
-        
     def next_move(self, game_state, player_state):
-        '''
-        This method is called each time your Agent is required to choose an action
-        
-        '''
-        action = ''
+        self.game_state = game_state
+        self.player_state = player_state
 
-        # grab up to date data
-        self.update(game_state, player_state)
-        
-        # determine target type
-        if len(game_state.treasure) > 0:
-            target = EntityTags.Treasure.value
-        elif player_state.ammo == 0:
-            target = EntityTags.Ammo.value
-        elif len(game_state.soft_blocks) > 0:
-            target = EntityTags.SoftBlock.value
-        else:
-            target = EntityTags.OreBlock.value
+        self.bombs_checker.update(game_state)
+        self.dangerous_positions = self.bombs_checker.get_dangerous_positions()
+        self.bombed_targets = self.bombs_checker.get_bombed_targets()
 
+        target = self.find_target(self.desire_targets())
+        print('target', target)
+        return self.get_next_action(target)
 
-        # find shortest / safest path
-        self.queue = queue.Queue()
-        self.queue.put(player_state.location)
-        self.visited_cells = {player_state.location: None}
-        target_pos = None
-        while(not self.queue.empty()): 
-            current = self.queue.get()
+    def desire_targets(self):
+        targets = {
+            EntityTags.Treasure.value,
+            EntityTags.Ammo.value,
+        }
+
+        if self.player_state.location in self.dangerous_positions:
+            targets.add(None)
+        elif self.player_state.ammo > 0:
+            targets.add(EntityTags.SoftBlock.value)
+            targets.add(EntityTags.OreBlock.value)
+
+        return targets
+
+    def find_target(self, targets):
+        q = queue.Queue()
+        q.put(self.player_state.location)
+        self.visited_positions = {self.player_state.location: None}
+
+        while(not q.empty()):
+            current = q.get()
             surroundings = [
                 (current[0]-1, current[1]),
                 (current[0], current[1]-1),
@@ -63,103 +74,137 @@ class Agent:
                 (current[0], current[1]+1),
             ]
             for pos in surroundings:
-                if not self.game_state.is_in_bounds(pos):
+                if not self.game_state.is_in_bounds(pos) or pos in self.visited_positions or pos in self.bombed_targets:
                     continue
 
-                if pos in self.visited_cells:
-                    continue
+                self.visited_positions[pos] = current
 
                 tag = self.game_state.entity_at(pos)
 
-                # if tag in self.VISITABLE_TAGS:
-                self.visited_cells[pos] = current        
+                if tag in targets:
+                    q.queue.clear()
+                    return {'pos': pos, 'tag': tag}
 
-                if tag == target and pos not in self.ignore_targets:
-                    print('found target', target, pos)
-                    self.queue.queue.clear()
-                    target_pos = pos
-                    break
-                
                 if tag in self.VISITABLE_TAGS:
-                    self.queue.put(pos)
-        
-        if target_pos != None:
-            pos = target_pos
-            path = [pos]
-            while pos in self.visited_cells:
-                prev = self.visited_cells[pos]
-                if prev == player_state.location:
-                    break
-                path.append(prev)
-                pos = prev
+                    q.put(pos)
 
-            if len(path) == 1 and target not in self.VISITABLE_TAGS:
-                action = 'p'
-                self.ignore_targets.add(target_pos)
-            else:
-                next_pos = path.pop()
-                offset = (next_pos[0] - player_state.location[0], next_pos[1] - player_state.location[1])
-                if offset in self.DIRECTIONS:
-                    action = self.DIRECTIONS[offset]
-        else:
-            # find a safe place
-            print('find a safe place')
+        return None
 
-        print(game_state.tick_number, target, action)
+    def get_next_action(self, target):
+        if not target:
+            return ''
 
-        return action
+        pos = target['pos']
+        path = [pos]
+        while pos in self.visited_positions:
+            prev = self.visited_positions[pos]
+            if prev == self.player_state.location:
+                break
+            path.append(prev)
+            pos = prev
 
+        next_to_block = len(path) == 1 and target['tag'] in self.BOMBABLE_TAGS
+        if next_to_block:
+            return 'p'
 
-    def update(self, game_state, player_state):
-        self.columns = game_state.size[0]
-        self.rows = game_state.size[1]
-        self.game_state = game_state
-        self.bombs.update(game_state.bombs, game_state.tick_number)
-        
-        
-            
+        next_pos = path.pop()
+        offset = (next_pos[0] - self.player_state.location[0], next_pos[1] - self.player_state.location[1])
+        if offset in self.DIRECTIONS:
+            return self.DIRECTIONS[offset]
+
+        return ''
+
 class BombsChecker:
-    BOMB_TICKS = 35
+    TICKS = 35
+    TICKS_AFTER_PLACEMENT = 3
+    TICKS_BEFORE_EXPLODE = 2
+    RANGE = [1, 2]
+    DIRECTIONS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+    EXPLOSION_BLOCKING_TAGS = {
+        EntityTags.IndestructibleBlock.value,
+        EntityTags.OreBlock.value,
+        EntityTags.SoftBlock.value,
+    }
 
     def __init__(self):
         self.bombs = {}
-        
-    def update(self, bombs, tick):
+        self.bombed_targets = {}
+
+    def add_targets(self, bomb):
+        # marked the surrounding bombed target
+        for d in self.DIRECTIONS:
+            for r in self.RANGE:
+                pos = (bomb[0] + d[0] * r, bomb[1] + d[1] * r)
+                if not self.game_state.is_in_bounds(pos) or self.game_state.entity_at(pos) not in Agent.BOMBABLE_TAGS:
+                    continue
+
+                if bomb not in self.bombed_targets:
+                    self.bombed_targets[bomb] = []
+
+                self.bombed_targets[bomb].append(pos)
+
+    def remove_targets(self, bomb):
+        if bomb in self.bombed_targets:
+            del self.bombed_targets[bomb]
+
+    def update(self, game_state):
+        self.game_state = game_state
+        self.tick = game_state.tick_number
+        bombs = set(game_state.bombs)
 
         # remove old bombs
-        old_bombs = set(self.bombs.keys()).difference(set(bombs))
+        old_bombs = set(self.bombs.keys()).difference(bombs)
         for b in old_bombs:
             del self.bombs[b]
-            print("T{} bomb explode".format(tick), b)
+            self.remove_targets(b)
 
         # remember new bombs
-        new_bombs = set(bombs).difference(set(self.bombs.keys()))
+        new_bombs = bombs.difference(set(self.bombs.keys()))
         for b in new_bombs:
-            self.bombs[b] = tick + self.BOMB_TICKS - 1
-            print("new bomb at {}, will explode at tick {}".format(b, self.bombs[b]))
+            self.bombs[b] = self.tick + self.TICKS - 1
+            self.add_targets(b)
 
-        # sortedBombs = [item[0] for item in sorted(self.bombs.items(), key=lambda item: item[1])]
-        # for i in range(1, len(sortedBombs)):
-        #     inRange = self.inBlastRange(sortedBombs[i-1], sortedBombs[i])
-        #     print('chained', inRange)
+        self.update_chained_bombs()
 
-        
+        print('bombds', self.tick, self.bombs.items())
 
-    def get_blast_locations(self, tick):
-        pending_bombs = [b for b in self.bombs if self.bombs[b] == tick]
-        locations = set()
-
+    def update_chained_bombs(self):
+        # find bombs that explode soon
+        tick = self.tick + self.TICKS_BEFORE_EXPLODE
+        pending_bombs = {b for b in self.bombs if tick == self.bombs[b]}
+        print('pending bombs', pending_bombs)
+        explosions = set()
         for b in pending_bombs:
-            locations = locations.union({
-                (b[0], b[1] - 2), 
-                (b[0], b[1] - 1), 
-                b, 
-                (b[0], b[1] + 1), 
-                (b[0], b[1] + 2), 
-                (b[0] - 2, b[1]), 
-                (b[0] - 1, b[1]), 
-                (b[0] + 1, b[1]), 
-                (b[0] + 2, b[1]),     
-            })
+            for d in self.DIRECTIONS:
+                for r in self.RANGE:
+                    pos = (b[0] + d[0] * r, b[1] + d[1] * r)
+                    if not self.game_state.is_in_bounds(pos) or self.game_state.entity_at(pos) in self.EXPLOSION_BLOCKING_TAGS:
+                        break
+                    explosions.add(pos)
 
-        return locations
+        for b in self.bombs.keys():
+            if b in pending_bombs or b not in explosions:
+                continue
+            self.bombs[b] = tick + 1
+
+    def get_dangerous_positions(self):
+        positions = set(self.bombs.keys())
+        dangerous_bombs = [b for b in self.bombs if (self.bombs[b] - self.TICKS + 1) < self.tick and not (self.bombs[b] - self.TICKS + self.TICKS_AFTER_PLACEMENT) < self.tick < (self.bombs[b] - self.TICKS_BEFORE_EXPLODE)]
+
+        for b in dangerous_bombs:
+            for d in self.DIRECTIONS:
+                for r in self.RANGE:
+                    pos = (b[0] + d[0] * r, b[1] + d[1] * r)
+                    if not self.game_state.is_in_bounds(pos) or self.game_state.entity_at(pos) in self.EXPLOSION_BLOCKING_TAGS:
+                        break
+                    positions.add(pos)
+        print('danger', positions)
+        return positions
+
+    def get_bombed_targets(self):
+        targets = set()
+        for b in self.bombed_targets:
+            for t in self.bombed_targets[b]:
+                targets.add(t)
+
+        return targets
