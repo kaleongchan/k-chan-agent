@@ -43,7 +43,6 @@ class Agent:
         self.bombed_targets = self.bombs_checker.get_bombed_targets()
 
         target = self.find_target(self.desire_targets())
-        print('target', target)
         return self.get_next_action(target)
 
     def desire_targets(self):
@@ -74,7 +73,7 @@ class Agent:
                 (current[0], current[1]+1),
             ]
             for pos in surroundings:
-                if not self.game_state.is_in_bounds(pos) or pos in self.visited_positions or pos in self.bombed_targets:
+                if not self.game_state.is_in_bounds(pos) or pos in self.visited_positions or pos in self.bombed_targets or pos in self.dangerous_positions:
                     continue
 
                 self.visited_positions[pos] = current
@@ -166,13 +165,10 @@ class BombsChecker:
 
         self.update_chained_bombs()
 
-        print('bombds', self.tick, self.bombs.items())
-
     def update_chained_bombs(self):
         # find bombs that explode soon
         tick = self.tick + self.TICKS_BEFORE_EXPLODE
         pending_bombs = {b for b in self.bombs if tick == self.bombs[b]}
-        print('pending bombs', pending_bombs)
         explosions = set()
         for b in pending_bombs:
             for d in self.DIRECTIONS:
@@ -198,7 +194,7 @@ class BombsChecker:
                     if not self.game_state.is_in_bounds(pos) or self.game_state.entity_at(pos) in self.EXPLOSION_BLOCKING_TAGS:
                         break
                     positions.add(pos)
-        print('danger', positions)
+
         return positions
 
     def get_bombed_targets(self):
